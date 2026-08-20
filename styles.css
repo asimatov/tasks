@@ -57,7 +57,24 @@ button { cursor: pointer; }
 .completed .delete-button { display: block; }
 .delete-button:hover, .delete-button:focus-visible { color: white; background: #a74435; }
 .delete-button:active { transform: scale(.92); }
-.task-text { flex: 1; min-height: 0; margin: 16px -6px 16px 0; padding-right: 6px; overflow-x: hidden; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-width: thin; scrollbar-color: rgba(29,30,27,.28) transparent; font-size: 15px; line-height: 1.5; font-weight: 600; letter-spacing: -.02em; }
+.task-text { flex: 1; min-height: 0; margin: 16px -6px 16px 0; padding-right: 6px; overflow-x: hidden; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-width: thin; scrollbar-color: rgba(29,30,27,.28) transparent; font-size: 15px; line-height: 1.5; font-weight: 500; letter-spacing: -.02em; }
+.task-text > :first-child { margin-top: 0; }
+.task-text > :last-child { margin-bottom: 0; }
+.task-text p { margin: 0 0 .75em; }
+.task-text strong { font-weight: 800; }
+.task-text h1, .task-text h2, .task-text h3, .task-text h4, .task-text h5, .task-text h6 { margin: .8em 0 .35em; line-height: 1.25; }
+.task-text h1 { font-size: 1.45em; }.task-text h2 { font-size: 1.3em; }.task-text h3 { font-size: 1.17em; }
+.task-text ul, .task-text ol { margin: .4em 0 .75em; padding-left: 1.5em; }
+.task-text .task-list-item { display: flex; align-items: flex-start; gap: .5em; margin-left: -1.25em; list-style: none; }
+.task-text .task-list-item input { flex: 0 0 auto; width: 1em; height: 1em; margin: .25em 0 0; accent-color: var(--ink); cursor: pointer; }
+.task-text .task-list-item input:checked + span { color: rgba(29,30,27,.58); text-decoration: line-through; }
+.task-text blockquote { margin: .5em 0; padding-left: .8em; border-left: 3px solid rgba(29,30,27,.35); color: rgba(29,30,27,.72); }
+.task-text code { padding: .12em .32em; border-radius: 4px; background: rgba(255,255,255,.35); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; }
+.task-text pre { overflow-x: auto; padding: .7em; border-radius: 8px; background: rgba(29,30,27,.09); white-space: pre; }
+.task-text pre code { padding: 0; background: transparent; }
+.task-text a { color: inherit; text-decoration-thickness: 1px; }
+.task-text img { display: block; max-width: 100%; max-height: 180px; margin: .5em 0; border-radius: 8px; object-fit: contain; }
+.task-text hr { border: 0; border-top: 1px solid rgba(29,30,27,.25); }
 .task-text::-webkit-scrollbar { width: 5px; }
 .task-text::-webkit-scrollbar-track { background: transparent; }
 .task-text::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(29,30,27,.28); }
