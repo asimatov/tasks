@@ -1,4 +1,4 @@
-# Quiet List
+# Task List
 
 A simple task tracker built with plain HTML, CSS and JavaScript.
 
