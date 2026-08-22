@@ -160,6 +160,8 @@ input:checked + .swatch { box-shadow: 0 0 0 2px var(--ink); transform: scale(.88
 .editor-topline { display: flex; justify-content: space-between; gap: 10px; }
 .compact-field, .editor-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .compact-field span, .editor-field span { font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; opacity: .62; }
+.editor-field .editor-label { display: flex; align-items: center; justify-content: space-between; }
+.char-count { font-size: 9px; font-weight: 700; letter-spacing: 0; }
 .compact-field select, .editor-field input, .editor-field textarea { border: 1px solid rgba(29,30,27,.2); border-radius: 9px; background: rgba(255,255,255,.42); outline: none; }
 .compact-field select { width: 105px; padding: 7px 8px; font-size: 11px; font-weight: 700; text-transform: capitalize; }
 .color-picker { position: relative; }

@@ -266,7 +266,7 @@ function createEditor(card, task) {
       </div>
     </div>
     <label class="editor-field"><span>Tags</span><input name="tags" type="text" maxlength="120" value="${escapeHtml(task.tags.join(", "))}" placeholder="work, personal, urgent"></label>
-    <label class="editor-field editor-text"><span>Task</span><textarea name="text" maxlength="1000" placeholder="What needs to be done?" required>${escapeHtml(task.text)}</textarea></label>
+    <label class="editor-field editor-text"><span class="editor-label">Task <small class="char-count">${task.text.length}/1000</small></span><textarea name="text" maxlength="1000" placeholder="What needs to be done?" required>${escapeHtml(task.text)}</textarea></label>
     <label class="status-toggle"><input name="completed" type="checkbox"${task.completed ? " checked" : ""}> Completed</label>
     <div class="editor-actions"><button class="editor-cancel" type="button">Cancel</button><button class="editor-save" type="submit">Save</button></div>
   </form>`;
@@ -326,6 +326,11 @@ elements.grid.addEventListener("click", event => {
   if (!card) return;
   if (Date.now() < suppressCardClickUntil) return;
   const task = tasks.find(item => item.id === card.dataset.id);
+  if (isCreating && task.id !== editingId) {
+    tasks = tasks.filter(item => item.id !== editingId);
+    editingId = null;
+    isCreating = false;
+  }
   const editor = event.target.closest(".card-editor");
   if (editor) {
     const pickerToggle = event.target.closest(".color-picker-toggle");
@@ -387,6 +392,11 @@ elements.grid.addEventListener("click", event => {
     isCreating = false;
     render(false);
   }
+});
+
+elements.grid.addEventListener("input", event => {
+  if (!event.target.matches('.card-editor textarea[name="text"]')) return;
+  event.target.closest(".editor-text").querySelector(".char-count").textContent = `${event.target.value.length}/1000`;
 });
 
 elements.grid.addEventListener("dragstart", event => {
