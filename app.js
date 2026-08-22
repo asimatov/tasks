@@ -2,19 +2,24 @@ const STORAGE_KEY = "quiet-list-tasks-v1";
 
 const elements = {
   grid: document.querySelector("#cardGrid"),
-  empty: document.querySelector("#emptyState"),
-  dialog: document.querySelector("#taskDialog"),
-  form: document.querySelector("#taskForm"),
-  text: document.querySelector("#taskText"),
-  tags: document.querySelector("#taskTags"),
-  charCount: document.querySelector("#charCount"),
-  dialogEyebrow: document.querySelector("#dialogEyebrow"),
-  dialogTitle: document.querySelector("#dialogTitle"),
+  tagFilters: document.querySelector("#tagFilters"),
   template: document.querySelector("#cardTemplate")
 };
 
 let tasks = loadTasks();
 let editingId = null;
+let isCreating = false;
+let sortBy = "tags";
+let sortDirection = "asc";
+let draggedCard = null;
+let suppressCardClickUntil = 0;
+const activeTags = new Set();
+const colors = [
+  "sand", "coral", "sage", "sky", "lilac", "cream", "blush", "peach",
+  "mint", "mist", "lavender", "stone", "rose", "butter", "olive", "aqua",
+  "denim", "mauve", "apricot", "pistachio", "ice", "periwinkle", "taupe", "lemon"
+];
+const priorities = ["high", "medium", "low"];
 
 function loadTasks() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
@@ -119,18 +124,98 @@ function renderMarkdown(value) {
   return output.join("");
 }
 
-function render(animate = true) {
+function render(animate = true, animateReorder = false) {
+  const previousPositions = animateReorder
+    ? new Map([...elements.grid.querySelectorAll(".task-card")].map(card => [card.dataset.id, card.getBoundingClientRect()]))
+    : null;
+  const draft = isCreating ? tasks.find(task => task.id === editingId) : null;
+  renderTagFilters();
   const visible = tasks
+    .filter(task => task !== draft && (!activeTags.size || task.tags.some(tag => activeTags.has(tag))))
     .sort((a, b) => {
-      const aTag = a.tags[0] || "\uffff";
-      const bTag = b.tags[0] || "\uffff";
-      return aTag.localeCompare(bTag, "en") || b.createdAt - a.createdAt;
+      if (!sortBy) return 0;
+      let result = 0;
+      if (sortBy === "priority") {
+        const rank = { high: 3, medium: 2, low: 1 };
+        result = (rank[a.priority || "medium"] - rank[b.priority || "medium"]);
+      } else if (sortBy === "date") {
+        result = a.createdAt - b.createdAt;
+      } else {
+        const aTag = a.tags[0] || "\uffff";
+        const bTag = b.tags[0] || "\uffff";
+        result = aTag.localeCompare(bTag, "en");
+      }
+      return result * (sortDirection === "asc" ? 1 : -1) || b.createdAt - a.createdAt;
     });
 
   elements.grid.replaceChildren();
   visible.forEach((task, index) => elements.grid.append(createCard(task, index, animate)));
-  elements.grid.hidden = visible.length === 0;
-  elements.empty.classList.toggle("visible", visible.length === 0);
+  if (draft) elements.grid.append(createCard(draft, visible.length, false));
+  else elements.grid.append(createGhostCard());
+  elements.grid.hidden = false;
+
+  if (previousPositions && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    elements.grid.querySelectorAll(".task-card").forEach(card => {
+      const previous = previousPositions.get(card.dataset.id);
+      if (!previous) return;
+      const current = card.getBoundingClientRect();
+      const deltaX = previous.left - current.left;
+      const deltaY = previous.top - current.top;
+      if (!deltaX && !deltaY) return;
+      card.animate(
+        [
+          { transform: `translate(${deltaX}px, ${deltaY}px)`, zIndex: 2 },
+          { transform: "translate(0, 0)", zIndex: 2 }
+        ],
+        { duration: 480, easing: "cubic-bezier(.22, 1, .36, 1)" }
+      );
+    });
+  }
+}
+
+function renderTagFilters() {
+  const tags = [...new Set(tasks.flatMap(task => task.tags))].sort((a, b) => a.localeCompare(b, "en"));
+  [...activeTags].forEach(tag => { if (!tags.includes(tag)) activeTags.delete(tag); });
+  elements.tagFilters.replaceChildren(...tags.map(tag => {
+    const button = document.createElement("button");
+    button.className = `tag-filter${activeTags.has(tag) ? " active" : ""}`;
+    button.type = "button";
+    button.dataset.tag = tag;
+    button.textContent = tag;
+    button.setAttribute("aria-pressed", String(activeTags.has(tag)));
+    return button;
+  }));
+  elements.tagFilters.hidden = tags.length === 0;
+}
+
+function updateSortControls() {
+  document.querySelectorAll(".sort-button").forEach(button => {
+    const active = button.dataset.sort === sortBy;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+    button.querySelector(".sort-direction").textContent = active ? (sortDirection === "asc" ? "↑" : "↓") : "";
+  });
+}
+
+function saveManualOrder() {
+  const ids = [...elements.grid.querySelectorAll(".task-card")].map(card => card.dataset.id);
+  const byId = new Map(tasks.map(task => [task.id, task]));
+  const visibleIds = new Set(ids);
+  const orderedVisible = ids.map(id => byId.get(id)).filter(Boolean);
+  let visibleIndex = 0;
+  tasks = tasks.map(task => visibleIds.has(task.id) ? orderedVisible[visibleIndex++] : task);
+  sortBy = null;
+  saveTasks();
+  updateSortControls();
+}
+
+function createGhostCard() {
+  const ghost = document.createElement("button");
+  ghost.className = "ghost-card";
+  ghost.type = "button";
+  ghost.setAttribute("aria-label", "Create a new card");
+  ghost.innerHTML = `<span class="ghost-plus" aria-hidden="true">+</span><span>New card</span>`;
+  return ghost;
 }
 
 function createCard(task, index, animate) {
@@ -140,8 +225,15 @@ function createCard(task, index, animate) {
   card.classList.toggle("completed", task.completed);
   card.style.animationDelay = `${Math.min(index * 45, 250)}ms`;
   card.dataset.id = task.id;
+  card.draggable = task.id !== editingId;
+  if (task.id === editingId) return createEditor(card, task);
   card.querySelector(".task-text").innerHTML = renderMarkdown(task.text);
   card.querySelector(".created-at").textContent = new Intl.DateTimeFormat("en", { day: "numeric", month: "short" }).format(task.createdAt);
+  const priority = task.priority || "medium";
+  const badge = card.querySelector(".priority-badge");
+  badge.innerHTML = `<span class="priority-icon ${priority}" aria-hidden="true"></span>`;
+  badge.className = `priority-badge ${priority}`;
+  badge.title = `${priority} priority`;
   const tagList = card.querySelector(".tag-list");
   if (task.tags.length) task.tags.forEach(tag => {
     const span = document.createElement("span");
@@ -158,51 +250,117 @@ function createCard(task, index, animate) {
   return card;
 }
 
-function openDialog(task = null) {
-  editingId = task?.id ?? null;
-  elements.form.reset();
-  elements.text.value = task?.text ?? "";
-  elements.tags.value = task?.tags.join(", ") ?? "";
-  document.querySelector(`input[name="color"][value="${task?.color || "sand"}"]`).checked = true;
-  elements.dialogEyebrow.textContent = task ? "Editing" : "New task";
-  elements.dialogTitle.textContent = task ? "Edit card" : "Create a card";
-  elements.charCount.textContent = elements.text.value.length;
-  elements.dialog.showModal();
-  setTimeout(() => elements.text.focus(), 50);
+function createEditor(card, task) {
+  card.classList.add("editing");
+  card.innerHTML = `<form class="card-editor">
+    <div class="editor-topline">
+      <div class="compact-field color-picker"><span>Color</span>
+        <input name="color" type="hidden" value="${task.color}">
+        <button class="color-picker-toggle" type="button" aria-label="Choose card color" aria-expanded="false"><span class="color-dot ${task.color}"></span><span class="picker-chevron">⌄</span></button>
+        <div class="color-palette" hidden>${colors.map(color => `<button class="color-choice${color === task.color ? " selected" : ""}" type="button" data-color="${color}" aria-label="${color}" title="${color}"><span class="color-dot ${color}"></span></button>`).join("")}</div>
+      </div>
+      <div class="compact-field priority-field"><span>Priority</span>
+        <input name="priority" type="hidden" value="${task.priority || "medium"}">
+        <button class="priority-picker-toggle" type="button" aria-label="Choose priority" aria-expanded="false"><span class="priority-icon ${task.priority || "medium"}"></span><span class="picker-chevron">⌄</span></button>
+        <div class="priority-palette" hidden>${priorities.map(priority => `<button class="priority-choice${priority === (task.priority || "medium") ? " selected" : ""}" type="button" data-priority="${priority}" aria-label="${priority} priority" title="${priority}"><span class="priority-icon ${priority}"></span></button>`).join("")}</div>
+      </div>
+    </div>
+    <label class="editor-field"><span>Tags</span><input name="tags" type="text" maxlength="120" value="${escapeHtml(task.tags.join(", "))}" placeholder="work, personal, urgent"></label>
+    <label class="editor-field editor-text"><span>Task</span><textarea name="text" maxlength="1000" placeholder="What needs to be done?" required>${escapeHtml(task.text)}</textarea></label>
+    <label class="status-toggle"><input name="completed" type="checkbox"${task.completed ? " checked" : ""}> Completed</label>
+    <div class="editor-actions"><button class="editor-cancel" type="button">Cancel</button><button class="editor-save" type="submit">Save</button></div>
+  </form>`;
+  requestAnimationFrame(() => {
+    const editor = card.querySelector(".card-editor");
+    const gridRect = elements.grid.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    if (cardRect.left + editor.offsetWidth > gridRect.right) card.classList.add("editor-align-right");
+    card.querySelector("textarea").focus();
+  });
+  return card;
 }
 
-function closeDialog() { elements.dialog.close(); editingId = null; }
+function startCreate() {
+  if (isCreating) return elements.grid.querySelector("textarea")?.focus();
+  const randomColor = colors[Math.floor(Math.random() * colors.length)];
+  const draft = { id: crypto.randomUUID(), text: "", tags: [], color: randomColor, priority: "medium", completed: false, createdAt: Date.now() };
+  tasks.push(draft);
+  editingId = draft.id;
+  isCreating = true;
+  render(false);
+}
 
-document.querySelector("#openCreateButton").addEventListener("click", () => openDialog());
-document.querySelector("#emptyCreateButton").addEventListener("click", () => openDialog());
-document.querySelector("#closeDialogButton").addEventListener("click", closeDialog);
-document.querySelector("#cancelButton").addEventListener("click", closeDialog);
-elements.text.addEventListener("input", () => elements.charCount.textContent = elements.text.value.length);
-elements.dialog.addEventListener("click", event => {
-  if (event.target === elements.dialog) closeDialog();
+function cancelEdit() {
+  if (isCreating) tasks = tasks.filter(task => task.id !== editingId);
+  editingId = null;
+  isCreating = false;
+  render(false);
+}
+
+elements.grid.addEventListener("click", event => {
+  if (event.target.closest(".ghost-card")) startCreate();
 });
 
-elements.form.addEventListener("submit", event => {
-  event.preventDefault();
-  const text = elements.text.value;
-  if (!text.trim()) return elements.text.focus();
-  const data = {
-    text,
-    tags: normalizeTags(elements.tags.value),
-    color: new FormData(elements.form).get("color")
-  };
-  const wasEditing = Boolean(editingId);
-  if (wasEditing) tasks = tasks.map(task => task.id === editingId ? { ...task, ...data } : task);
-  else tasks.push({ id: crypto.randomUUID(), ...data, completed: false, createdAt: Date.now() });
-  saveTasks();
-  closeDialog();
-  render(!wasEditing);
+document.querySelector(".sort-controls").addEventListener("click", event => {
+  const button = event.target.closest(".sort-button");
+  if (!button) return;
+  if (sortBy === button.dataset.sort) sortDirection = sortDirection === "asc" ? "desc" : "asc";
+  else {
+    sortBy = button.dataset.sort;
+    sortDirection = "asc";
+  }
+  updateSortControls();
+  render(false, true);
+});
+
+elements.tagFilters.addEventListener("click", event => {
+  const button = event.target.closest(".tag-filter");
+  if (!button) return;
+  if (activeTags.has(button.dataset.tag)) activeTags.delete(button.dataset.tag);
+  else activeTags.add(button.dataset.tag);
+  render(false, true);
 });
 
 elements.grid.addEventListener("click", event => {
   const card = event.target.closest(".task-card");
   if (!card) return;
+  if (Date.now() < suppressCardClickUntil) return;
   const task = tasks.find(item => item.id === card.dataset.id);
+  const editor = event.target.closest(".card-editor");
+  if (editor) {
+    const pickerToggle = event.target.closest(".color-picker-toggle");
+    const colorChoice = event.target.closest(".color-choice");
+    const priorityToggle = event.target.closest(".priority-picker-toggle");
+    const priorityChoice = event.target.closest(".priority-choice");
+    if (pickerToggle) {
+      const palette = editor.querySelector(".color-palette");
+      palette.hidden = !palette.hidden;
+      pickerToggle.setAttribute("aria-expanded", String(!palette.hidden));
+    } else if (colorChoice) {
+      const color = colorChoice.dataset.color;
+      editor.elements.color.value = color;
+      editor.querySelector(".color-picker-toggle .color-dot").className = `color-dot ${color}`;
+      editor.querySelectorAll(".color-choice").forEach(choice => choice.classList.toggle("selected", choice === colorChoice));
+      const palette = editor.querySelector(".color-palette");
+      palette.hidden = true;
+      editor.querySelector(".color-picker-toggle").setAttribute("aria-expanded", "false");
+      colors.forEach(name => card.classList.remove(name));
+      card.classList.add(color);
+    } else if (priorityToggle) {
+      const palette = editor.querySelector(".priority-palette");
+      palette.hidden = !palette.hidden;
+      priorityToggle.setAttribute("aria-expanded", String(!palette.hidden));
+    } else if (priorityChoice) {
+      const priority = priorityChoice.dataset.priority;
+      editor.elements.priority.value = priority;
+      editor.querySelector(".priority-picker-toggle .priority-icon").className = `priority-icon ${priority}`;
+      editor.querySelectorAll(".priority-choice").forEach(choice => choice.classList.toggle("selected", choice === priorityChoice));
+      const palette = editor.querySelector(".priority-palette");
+      palette.hidden = true;
+      editor.querySelector(".priority-picker-toggle").setAttribute("aria-expanded", "false");
+    } else if (event.target.closest(".editor-cancel")) cancelEdit();
+    return;
+  }
   const markdownCheckbox = event.target.closest(".markdown-checkbox");
   if (markdownCheckbox) {
     const newline = task.text.match(/\r\n|\r|\n/)?.[0] || "\n";
@@ -224,7 +382,69 @@ elements.grid.addEventListener("click", event => {
       tasks = tasks.filter(item => item.id !== task.id);
       saveTasks(); render(false);
     }
-  } else openDialog(task);
+  } else {
+    editingId = task.id;
+    isCreating = false;
+    render(false);
+  }
+});
+
+elements.grid.addEventListener("dragstart", event => {
+  const card = event.target.closest(".task-card:not(.editing)");
+  if (!card) return event.preventDefault();
+  draggedCard = card;
+  card.classList.add("dragging");
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", card.dataset.id);
+});
+
+elements.grid.addEventListener("dragover", event => {
+  if (!draggedCard) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  const target = event.target.closest(".task-card:not(.dragging)");
+  if (!target) return;
+  const rect = target.getBoundingClientRect();
+  const sameRow = event.clientY >= rect.top && event.clientY <= rect.bottom;
+  const insertBefore = sameRow
+    ? event.clientX < rect.left + rect.width / 2
+    : event.clientY < rect.top + rect.height / 2;
+  elements.grid.insertBefore(draggedCard, insertBefore ? target : target.nextSibling);
+});
+
+elements.grid.addEventListener("drop", event => {
+  if (!draggedCard) return;
+  event.preventDefault();
+  saveManualOrder();
+});
+
+elements.grid.addEventListener("dragend", () => {
+  if (!draggedCard) return;
+  draggedCard.classList.remove("dragging");
+  draggedCard = null;
+  suppressCardClickUntil = Date.now() + 250;
+});
+
+elements.grid.addEventListener("submit", event => {
+  const form = event.target.closest(".card-editor");
+  if (!form) return;
+  event.preventDefault();
+  const data = new FormData(form);
+  const text = data.get("text");
+  if (!text.trim()) return form.elements.text.focus();
+  const wasCreating = isCreating;
+  tasks = tasks.map(task => task.id === editingId ? {
+    ...task,
+    text,
+    tags: normalizeTags(data.get("tags")),
+    color: data.get("color"),
+    priority: data.get("priority"),
+    completed: data.has("completed")
+  } : task);
+  saveTasks();
+  editingId = null;
+  isCreating = false;
+  render(false, wasCreating);
 });
 
 render();
