@@ -1,12 +1,16 @@
 const STORAGE_KEY = "quiet-list-tasks-v1";
+const NOTE_STORAGE_KEY = "quiet-list-important-note-v1";
 
 const elements = {
   grid: document.querySelector("#cardGrid"),
   tagFilters: document.querySelector("#tagFilters"),
+  importantNote: document.querySelector("#importantNote"),
   template: document.querySelector("#cardTemplate")
 };
 
 let tasks = loadTasks();
+let importantNote = loadImportantNote();
+let isEditingNote = false;
 let editingId = null;
 let isCreating = false;
 let sortBy = "tags";
@@ -30,6 +34,15 @@ function saveTasks() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
 }
 
+function loadImportantNote() {
+  try { return localStorage.getItem(NOTE_STORAGE_KEY) || ""; }
+  catch { return ""; }
+}
+
+function saveImportantNote() {
+  localStorage.setItem(NOTE_STORAGE_KEY, importantNote);
+}
+
 function normalizeTags(value) {
   return [...new Set(value.split(",").map(tag => tag.trim().toLowerCase()).filter(Boolean))].slice(0, 6);
 }
@@ -44,22 +57,30 @@ function escapeHtml(value) {
 }
 
 function renderInlineMarkdown(value) {
-  const codeSpans = [];
-  let html = escapeHtml(value).replace(/`([^`\n]+)`/g, (_, code) => {
-    const index = codeSpans.push(`<code>${code}</code>`) - 1;
+  const protectedFragments = [];
+  const protect = fragment => {
+    const index = protectedFragments.push(fragment) - 1;
     return `\u0000${index}\u0000`;
+  };
+
+  let html = escapeHtml(value).replace(/`([^`\n]+)`/g, (_, code) => {
+    return protect(`<code>${code}</code>`);
   });
 
   html = html
-    .replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, '<img src="$2" alt="$1" loading="lazy">')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    .replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, (_, alt, url) => {
+      return protect(`<img src="${url}" alt="${alt}" loading="lazy">`);
+    })
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => {
+      return protect(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+    })
     .replace(/\*\*([^\n]+?)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^\n]+?)__/g, "<strong>$1</strong>")
     .replace(/~~([^\n]+?)~~/g, "<del>$1</del>")
     .replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, "$1<em>$2</em>")
     .replace(/(^|[^_])_([^_\n]+?)_(?!_)/g, "$1<em>$2</em>");
 
-  return html.replace(/\u0000(\d+)\u0000/g, (_, index) => codeSpans[Number(index)]);
+  return html.replace(/\u0000(\d+)\u0000/g, (_, index) => protectedFragments[Number(index)]);
 }
 
 function renderMarkdown(value) {
@@ -79,8 +100,13 @@ function renderMarkdown(value) {
     output.push(`</${listType}>`);
     listType = null;
   };
+  const parseTableRow = line => {
+    const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+    return trimmed.split("|").map(cell => cell.trim());
+  };
 
-  for (const [lineIndex, line] of lines.entries()) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
     if (code !== null) {
       if (/^\s*```/.test(line)) {
         output.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
@@ -95,7 +121,25 @@ function renderMarkdown(value) {
     const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+)$/);
     const listItem = line.match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
     const quote = line.match(/^\s{0,3}>\s?(.*)$/);
-    if (heading) {
+    const tableHeaders = line.includes("|") ? parseTableRow(line) : [];
+    const tableDivider = lines[lineIndex + 1]?.includes("|") ? parseTableRow(lines[lineIndex + 1]) : [];
+    const isTable = tableHeaders.length > 1
+      && tableHeaders.length === tableDivider.length
+      && tableDivider.every(cell => /^:?-{3,}:?$/.test(cell));
+    if (isTable) {
+      flushParagraph(); closeList();
+      const alignments = tableDivider.map(cell => cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : "left");
+      const header = tableHeaders.map((cell, index) => `<th style="text-align:${alignments[index]}">${renderInlineMarkdown(cell)}</th>`).join("");
+      const rows = [];
+      lineIndex += 2;
+      while (lineIndex < lines.length && lines[lineIndex].includes("|")) {
+        const cells = parseTableRow(lines[lineIndex]);
+        rows.push(`<tr>${tableHeaders.map((_, index) => `<td style="text-align:${alignments[index]}">${renderInlineMarkdown(cells[index] || "")}</td>`).join("")}</tr>`);
+        lineIndex += 1;
+      }
+      lineIndex -= 1;
+      output.push(`<table><thead><tr>${header}</tr></thead><tbody>${rows.join("")}</tbody></table>`);
+    } else if (heading) {
       flushParagraph(); closeList();
       const level = heading[1].length;
       output.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
@@ -122,6 +166,26 @@ function renderMarkdown(value) {
   if (code !== null) output.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
   flushParagraph(); closeList();
   return output.join("");
+}
+
+function renderImportantNote() {
+  if (isEditingNote) {
+    elements.importantNote.classList.add("editing");
+    elements.importantNote.innerHTML = `<form class="important-note-editor">
+      <label for="importantNoteText">Important note</label>
+      <textarea id="importantNoteText" name="text" placeholder="Write an important note or paste a link…">${escapeHtml(importantNote)}</textarea>
+      <div class="important-note-actions"><button class="note-cancel" type="button">Cancel</button><button class="note-save" type="submit">Save</button></div>
+    </form>`;
+    requestAnimationFrame(() => elements.importantNote.querySelector("textarea")?.focus());
+    return;
+  }
+
+  elements.importantNote.classList.remove("editing");
+  if (importantNote.trim()) {
+    elements.importantNote.innerHTML = `<div class="important-note-content task-text" title="Click to edit">${renderMarkdown(importantNote)}</div>`;
+  } else {
+    elements.importantNote.innerHTML = `<button class="important-note-empty" type="button"><span aria-hidden="true">+</span> Important note</button>`;
+  }
 }
 
 function render(animate = true, animateReorder = false) {
@@ -151,7 +215,7 @@ function render(animate = true, animateReorder = false) {
   elements.grid.replaceChildren();
   visible.forEach((task, index) => elements.grid.append(createCard(task, index, animate)));
   if (draft) elements.grid.append(createCard(draft, visible.length, false));
-  else elements.grid.append(createGhostCard());
+  else elements.grid.append(createGhostCard(animate, visible.length));
   elements.grid.hidden = false;
 
   if (previousPositions && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -209,9 +273,11 @@ function saveManualOrder() {
   updateSortControls();
 }
 
-function createGhostCard() {
+function createGhostCard(animate, index) {
   const ghost = document.createElement("button");
   ghost.className = "ghost-card";
+  ghost.classList.toggle("animate-in", animate);
+  ghost.style.animationDelay = `${Math.min(index * 45, 250)}ms`;
   ghost.type = "button";
   ghost.setAttribute("aria-label", "Create a new card");
   ghost.innerHTML = `<span class="ghost-plus" aria-hidden="true">+</span><span>New card</span>`;
@@ -299,6 +365,45 @@ function cancelEdit() {
 
 elements.grid.addEventListener("click", event => {
   if (event.target.closest(".ghost-card")) startCreate();
+});
+
+elements.importantNote.addEventListener("click", event => {
+  if (event.target.closest("a") || event.target.closest(".markdown-checkbox")) return;
+  if (event.target.closest(".note-cancel")) {
+    isEditingNote = false;
+    renderImportantNote();
+    return;
+  }
+  if (!isEditingNote) {
+    isEditingNote = true;
+    renderImportantNote();
+  }
+});
+
+elements.importantNote.addEventListener("submit", event => {
+  const form = event.target.closest(".important-note-editor");
+  if (!form) return;
+  event.preventDefault();
+  importantNote = new FormData(form).get("text");
+  saveImportantNote();
+  isEditingNote = false;
+  renderImportantNote();
+});
+
+elements.importantNote.addEventListener("change", event => {
+  const checkbox = event.target.closest(".markdown-checkbox");
+  if (!checkbox) return;
+  const newline = importantNote.match(/\r\n|\r|\n/)?.[0] || "\n";
+  const lines = importantNote.split(/\r\n|\r|\n/);
+  const lineIndex = Number(checkbox.dataset.line);
+  if (lines[lineIndex] === undefined) return;
+  lines[lineIndex] = lines[lineIndex].replace(
+    /^(\s*[-+*]\s+\[)[ xX](\])/,
+    `$1${checkbox.checked ? "x" : " "}$2`
+  );
+  importantNote = lines.join(newline);
+  saveImportantNote();
+  renderImportantNote();
 });
 
 document.querySelector(".sort-controls").addEventListener("click", event => {
@@ -457,4 +562,5 @@ elements.grid.addEventListener("submit", event => {
   render(false, wasCreating);
 });
 
+renderImportantNote();
 render();

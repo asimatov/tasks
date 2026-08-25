@@ -32,6 +32,7 @@ Card text is stored as the original Markdown and rendered only when the card is 
   - `- [x] Completed`
 - Links: `[OpenAI](https://openai.com)`
 - Images: `![Description](https://example.com/image.png)`
+- Tables using a header row and separator row, such as `| Name | Link |` followed by `| --- | --- |`
 - Horizontal rules using `---`, `***`, or `___`
 - Paragraphs and line breaks
 
