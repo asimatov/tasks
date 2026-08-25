@@ -1,5 +1,7 @@
 const STORAGE_KEY = "quiet-list-tasks-v1";
 const NOTE_STORAGE_KEY = "quiet-list-important-note-v1";
+const DATABASE_NAME = "quiet-list-db";
+const DATABASE_VERSION = 1;
 
 const elements = {
   grid: document.querySelector("#cardGrid"),
@@ -8,8 +10,10 @@ const elements = {
   template: document.querySelector("#cardTemplate")
 };
 
-let tasks = loadTasks();
-let importantNote = loadImportantNote();
+let tasks = [];
+let importantNote = "";
+let database;
+let databaseWriteQueue = Promise.resolve();
 let isEditingNote = false;
 let editingId = null;
 let isCreating = false;
@@ -25,22 +29,146 @@ const colors = [
 ];
 const priorities = ["high", "medium", "low"];
 
-function loadTasks() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
-  catch { return []; }
+function requestResult(request) {
+  return new Promise((resolve, reject) => {
+    request.addEventListener("success", () => resolve(request.result));
+    request.addEventListener("error", () => reject(request.error));
+  });
 }
 
-function saveTasks() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+function transactionComplete(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.addEventListener("complete", resolve);
+    transaction.addEventListener("abort", () => reject(transaction.error));
+    transaction.addEventListener("error", () => reject(transaction.error));
+  });
 }
 
-function loadImportantNote() {
-  try { return localStorage.getItem(NOTE_STORAGE_KEY) || ""; }
-  catch { return ""; }
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+    request.addEventListener("upgradeneeded", () => {
+      const db = request.result;
+      const tasksStore = db.createObjectStore("tasks", { keyPath: "id" });
+      tasksStore.createIndex("completed", "completed");
+      tasksStore.createIndex("createdAt", "createdAt");
+      tasksStore.createIndex("updatedAt", "updatedAt");
+
+      const versionsStore = db.createObjectStore("versions", { keyPath: "id" });
+      versionsStore.createIndex("taskId", "taskId");
+      versionsStore.createIndex("timestamp", "timestamp");
+
+      const historyStore = db.createObjectStore("history", { keyPath: "id" });
+      historyStore.createIndex("taskId", "taskId");
+      historyStore.createIndex("type", "type");
+      historyStore.createIndex("timestamp", "timestamp");
+      historyStore.createIndex("taskText", "taskText");
+      historyStore.createIndex("searchText", "searchText");
+
+      db.createObjectStore("settings", { keyPath: "key" });
+    });
+    request.addEventListener("success", () => resolve(request.result));
+    request.addEventListener("error", () => reject(request.error));
+    request.addEventListener("blocked", () => reject(new Error("IndexedDB upgrade was blocked by another tab")));
+  });
+}
+
+function queueDatabaseWrite(operation) {
+  databaseWriteQueue = databaseWriteQueue.then(operation).catch(error => {
+    console.error("Could not save data to IndexedDB", error);
+  });
+  return databaseWriteQueue;
+}
+
+function snapshotTask(task) {
+  return {
+    text: task.text,
+    tags: [...task.tags],
+    color: task.color,
+    priority: task.priority || "medium",
+    completed: Boolean(task.completed),
+    createdAt: task.createdAt
+  };
+}
+
+function createVersion(task, reason, timestamp = Date.now()) {
+  return { id: crypto.randomUUID(), taskId: task.id, timestamp, reason, snapshot: snapshotTask(task) };
+}
+
+function createHistoryEvent(task, type, timestamp = Date.now()) {
+  return {
+    id: crypto.randomUUID(),
+    taskId: task.id,
+    type,
+    timestamp,
+    taskText: task.text,
+    tags: [...task.tags],
+    searchText: `${task.text} ${task.tags.join(" ")}`.toLocaleLowerCase()
+  };
+}
+
+function saveTasks({ versions = [], events = [] } = {}) {
+  const records = tasks.map((task, order) => ({ ...task, order }));
+  return queueDatabaseWrite(async () => {
+    const transaction = database.transaction(["tasks", "versions", "history"], "readwrite");
+    const tasksStore = transaction.objectStore("tasks");
+    tasksStore.clear();
+    records.forEach(record => tasksStore.put(record));
+    versions.forEach(version => transaction.objectStore("versions").put(version));
+    events.forEach(event => transaction.objectStore("history").put(event));
+    await transactionComplete(transaction);
+  });
 }
 
 function saveImportantNote() {
-  localStorage.setItem(NOTE_STORAGE_KEY, importantNote);
+  const value = importantNote;
+  return queueDatabaseWrite(async () => {
+    const transaction = database.transaction("settings", "readwrite");
+    transaction.objectStore("settings").put({ key: "importantNote", value });
+    await transactionComplete(transaction);
+  });
+}
+
+async function migrateLocalStorage() {
+  const transaction = database.transaction(["tasks", "settings"], "readonly");
+  const existingTasksRequest = transaction.objectStore("tasks").getAll();
+  const migrationRequest = transaction.objectStore("settings").get("localStorageMigrationV1");
+  const noteRequest = transaction.objectStore("settings").get("importantNote");
+  const [existingTasks, migration, savedNote] = await Promise.all([
+    requestResult(existingTasksRequest), requestResult(migrationRequest), requestResult(noteRequest), transactionComplete(transaction)
+  ]);
+  if (migration) return;
+
+  let legacyTasks = [];
+  let legacyNote = "";
+  try {
+    legacyTasks = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+    legacyNote = localStorage.getItem(NOTE_STORAGE_KEY) || "";
+  } catch { /* Ignore unavailable or invalid legacy storage. */ }
+
+  const writeTransaction = database.transaction(["tasks", "settings"], "readwrite");
+  if (!existingTasks.length) {
+    legacyTasks.forEach((task, order) => writeTransaction.objectStore("tasks").put({ ...task, order, updatedAt: task.updatedAt || task.createdAt }));
+  }
+  if (!savedNote && legacyNote) writeTransaction.objectStore("settings").put({ key: "importantNote", value: legacyNote });
+  writeTransaction.objectStore("settings").put({ key: "localStorageMigrationV1", value: true });
+  await transactionComplete(writeTransaction);
+
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(NOTE_STORAGE_KEY);
+  } catch { /* IndexedDB already contains the migrated data. */ }
+}
+
+async function loadApplicationData() {
+  const transaction = database.transaction(["tasks", "settings"], "readonly");
+  const tasksRequest = transaction.objectStore("tasks").getAll();
+  const noteRequest = transaction.objectStore("settings").get("importantNote");
+  const [storedTasks, storedNote] = await Promise.all([
+    requestResult(tasksRequest), requestResult(noteRequest), transactionComplete(transaction)
+  ]);
+  tasks = storedTasks.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  importantNote = storedNote?.value || "";
 }
 
 function normalizeTags(value) {
@@ -473,6 +601,7 @@ elements.grid.addEventListener("click", event => {
   }
   const markdownCheckbox = event.target.closest(".markdown-checkbox");
   if (markdownCheckbox) {
+    const previousVersion = createVersion(task, "updated");
     const newline = task.text.match(/\r\n|\r|\n/)?.[0] || "\n";
     const lines = task.text.split(/\r\n|\r|\n/);
     const lineIndex = Number(markdownCheckbox.dataset.line);
@@ -482,15 +611,26 @@ elements.grid.addEventListener("click", event => {
         `$1${markdownCheckbox.checked ? "x" : " "}$2`
       );
       task.text = lines.join(newline);
-      saveTasks(); render(false);
+      task.updatedAt = Date.now();
+      saveTasks({ versions: [previousVersion], events: [createHistoryEvent(task, "updated")] });
+      render(false);
     }
   } else if (event.target.closest(".complete-button")) {
+    const previousVersion = createVersion(task, task.completed ? "before-reopen" : "before-complete");
     task.completed = !task.completed;
-    saveTasks(); render(false);
+    task.updatedAt = Date.now();
+    saveTasks({
+      versions: [previousVersion],
+      events: [createHistoryEvent(task, task.completed ? "completed" : "reopened")]
+    });
+    render(false);
   } else if (event.target.closest(".delete-button") && task.completed) {
     if (confirm("Delete this card?")) {
+      const deletedVersion = createVersion(task, "deleted");
+      const deletedEvent = createHistoryEvent(task, "deleted");
       tasks = tasks.filter(item => item.id !== task.id);
-      saveTasks(); render(false);
+      saveTasks({ versions: [deletedVersion], events: [deletedEvent] });
+      render(false);
     }
   } else {
     editingId = task.id;
@@ -548,19 +688,47 @@ elements.grid.addEventListener("submit", event => {
   const text = data.get("text");
   if (!text.trim()) return form.elements.text.focus();
   const wasCreating = isCreating;
-  tasks = tasks.map(task => task.id === editingId ? {
-    ...task,
+  const previousTask = tasks.find(task => task.id === editingId);
+  const updatedTask = {
+    ...previousTask,
     text,
     tags: normalizeTags(data.get("tags")),
     color: data.get("color"),
     priority: data.get("priority"),
-    completed: data.has("completed")
-  } : task);
-  saveTasks();
+    completed: data.has("completed"),
+    updatedAt: Date.now()
+  };
+  tasks = tasks.map(task => task.id === editingId ? updatedTask : task);
+
+  const versions = [];
+  const events = [];
+  if (wasCreating) {
+    versions.push(createVersion(updatedTask, "created"));
+    events.push(createHistoryEvent(updatedTask, "created"));
+  } else if (JSON.stringify(snapshotTask(previousTask)) !== JSON.stringify(snapshotTask(updatedTask))) {
+    versions.push(createVersion(previousTask, "updated"));
+    events.push(createHistoryEvent(updatedTask, "updated"));
+    if (previousTask.completed !== updatedTask.completed) {
+      events.push(createHistoryEvent(updatedTask, updatedTask.completed ? "completed" : "reopened"));
+    }
+  }
+  saveTasks({ versions, events });
   editingId = null;
   isCreating = false;
   render(false, wasCreating);
 });
 
-renderImportantNote();
-render();
+async function initializeApplication() {
+  database = await openDatabase();
+  await migrateLocalStorage();
+  await loadApplicationData();
+  renderImportantNote();
+  render();
+}
+
+initializeApplication().catch(error => {
+  console.error("Could not initialize IndexedDB", error);
+  elements.importantNote.innerHTML = "";
+  elements.grid.innerHTML = `<div class="empty-state visible"><h2>Could not open local database</h2><p>Check that browser storage is enabled, then reload the page.</p></div>`;
+  elements.grid.hidden = false;
+});
